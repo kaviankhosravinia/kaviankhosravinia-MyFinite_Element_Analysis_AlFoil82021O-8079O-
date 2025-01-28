@@ -1,0 +1,56 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.spatial import Delaunay
+
+# Identify boundary vertices
+def find_boundary_vertices(points, simplices):
+    edge_count = {}
+    for simplex in simplices:
+        for i in range(3):
+            edge = tuple(sorted((simplex[i], simplex[(i + 1) % 3])))
+            edge_count[edge] = edge_count.get(edge, 0) + 1
+    # Edges appearing only once are boundary edges
+    boundary_edges = [edge for edge, count in edge_count.items() if count == 1]
+    boundary_vertices = set(v for edge in boundary_edges for v in edge)
+    return boundary_vertices
+
+# Laplacian Smoothing with boundary preservation
+def laplacian_smoothing(points, simplices, iterations=10, alpha=0.5):
+    """
+    Perform Laplacian smoothing on a 2D triangle mesh while preserving boundary vertices.
+    :param points: Array of vertex coordinates (n, 2).
+    :param simplices: Array of triangle indices (m, 3).
+    :param iterations: Number of smoothing iterations.
+    :param alpha: Relaxation factor (0 < alpha <= 1).
+    :return: Smoothed vertex coordinates.
+    """
+    # Find boundary vertices
+    boundary_vertices = find_boundary_vertices(points, simplices)
+
+    # Build a list of neighbors for each vertex
+    neighbors = {i: set() for i in range(len(points))}
+    for tri in simplices:
+        for i in range(3):
+            neighbors[tri[i]].update([tri[(i + 1) % 3], tri[(i + 2) % 3]])
+
+    smoothed_points = points.copy()
+    for _ in range(iterations):
+        new_points = smoothed_points.copy()
+        for i in range(len(points)):
+            if i in boundary_vertices:
+                continue  # Skip boundary vertices
+            if len(neighbors[i]) > 0:
+                neighbor_coords = smoothed_points[list(neighbors[i])]
+                centroid = np.mean(neighbor_coords, axis=0)
+                new_points[i] = alpha * centroid + (1 - alpha) * smoothed_points[i]
+        smoothed_points = new_points
+
+    return smoothed_points
+
+def smooth_mesh(tri,iterations,alpha):
+
+    # Apply Laplacian smoothing
+    smoothed_points = laplacian_smoothing(tri.points, tri.simplices, iterations, alpha)
+    trio=Delaunay(smoothed_points)
+    return trio
+
