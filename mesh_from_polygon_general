@@ -1,0 +1,178 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from shapely.geometry import Point, Polygon, LineString
+from scipy.spatial import Delaunay, cKDTree
+
+
+from laplacian_smooth import smooth_mesh
+
+
+
+
+
+
+# Subdivide polyline function
+def subdivide_polyline(polyline, max_segment_length):
+    subdivided_polyline = [polyline[0]]
+    for p1, p2 in zip(polyline[:-1], polyline[1:]):
+        segment_length = np.linalg.norm(p2 - p1)
+        if segment_length > max_segment_length:
+            num_subdivisions = int(np.ceil(segment_length / max_segment_length))
+            for t in np.linspace(0, 1, num_subdivisions, endpoint=False)[1:]:
+                subdivided_polyline.append(p1 + t * (p2 - p1))
+        subdivided_polyline.append(p2)
+    return np.array(subdivided_polyline)
+
+# Process polygon edges for circle intersection and subdivision
+
+
+
+
+def process_polyline(polyline, circle_center, circle_radius, max_length):
+    circle = Point(circle_center).buffer(circle_radius)  # Create a circular polygon
+    result_points = []  # Store the final result points
+
+    for i in range(len(polyline) - 1):
+        segment = LineString([polyline[i], polyline[i + 1]])
+
+        # Check for intersections with the circle
+        if segment.intersects(circle):
+            intersection = segment.intersection(circle)
+
+            # Extract inside and outside parts of the segment
+            inside_parts = []
+            if intersection.geom_type == "LineString":
+                inside_parts = [intersection]
+            elif intersection.geom_type == "MultiLineString":
+                inside_parts = list(intersection)
+
+            # Process each inside part for subdivision
+            for part in inside_parts:
+                num_subdivisions = max(1, int(np.ceil(part.length / max_length)))
+                subdivided_points = [
+                    part.interpolate(t, normalized=True)
+                    for t in np.linspace(0, 1, num_subdivisions + 1)
+                ]
+                result_points.extend(subdivided_points[:-1])  # Avoid duplicating end points
+
+            # Add the last point of the segment if it's outside the circle
+            if not circle.contains(Point(polyline[i + 1])):
+                result_points.append(Point(polyline[i + 1]))
+        else:
+            # If the segment is entirely outside, add its end point
+            result_points.append(Point(polyline[i + 1]))
+
+    # Convert result points to numpy array
+    result_array = np.array([(p.x, p.y) for p in result_points])
+    return result_array
+
+
+
+# Filter triangles based on polygon containment
+def filter_delaunay(delaunay, polygon):
+    valid_simplices = []
+    for simplex in delaunay.simplices:
+        triangle = Polygon([delaunay.points[i] for i in simplex])
+        if polygon.contains(triangle.centroid):
+            valid_simplices.append(simplex)
+    delaunay.simplices = np.array(valid_simplices)
+    return delaunay
+	
+
+
+
+def visualize_delaunay(delaunay, boundary=None):
+    plt.triplot(delaunay.points[:, 0], delaunay.points[:, 1], delaunay.simplices)
+    if boundary is not None:
+        plt.plot(boundary[:, 0], boundary[:, 1], 'r-', linewidth=2)
+    plt.gca().set_aspect('equal')
+    #plt.show()
+
+
+
+
+
+
+
+def mesh_polygon(polygon_points,circle_center,mesh_params):
+    
+    
+    circle_radius = mesh_params["circle_radius"]
+    grid_size_x = mesh_params["grid_size_x"]
+    grid_size_y = mesh_params["grid_size_y"]
+    grid_size_r = mesh_params["grid_size_r"]
+    grid_size_t = mesh_params["grid_size_t"]
+    segment_length = mesh_params["segment_length"]
+    
+
+    new_points = process_polyline(polygon_points, circle_center, circle_radius, segment_length)
+    new_points = np.vstack([new_points, new_points[0]])
+
+    # Subdivide the polygon
+    subdivided_polygon = subdivide_polyline(new_points, segment_length*4)
+    
+    # Define the grid resolution
+    # grid_size_x, grid_size_y, grid_size_r, grid_size_t = 12, 6, 8, 24
+
+    polygon = Polygon(polygon_points)
+    # Define the bounding box
+    min_x, min_y = polygon.bounds[:2]
+    max_x, max_y = polygon.bounds[2:]
+
+
+    # Generate grid points within the bounding box
+    x_coords = np.linspace(min_x, max_x, grid_size_x)
+    y_coords = np.linspace(min_y, max_y, grid_size_y)
+    grid_points = np.array([[x, y] for x in x_coords for y in y_coords])
+
+    # Filter points inside the polygon
+    inside_points = np.array([point for point in grid_points if polygon.contains(Point(point))])
+
+
+    # Generate polar grid points
+
+    arc_length = segment_length/3                   # Desired arc length
+    xo = np.linspace(0, 1, grid_size_r)  # Linear space between 0 and 1
+    radii = circle_radius * xo**1.1  # Quadratic spacing (adjust 'power' as needed)
+    #radii = np.linspace(0, circle_radius, 8)  # Radial patterns
+
+    # Generate points
+    polar_points = []
+    for r in radii:
+        arc_length=arc_length*1.2
+        if r == 0:
+            polar_points.append((circle_center.x, circle_center.y))
+        else:
+            num_points = max(1, int(2 * np.pi * r / arc_length))  # Points based on arc length
+            theta = np.linspace(0, 2 * np.pi, num_points, endpoint=False)
+            for angle in theta:
+                x = circle_center.x + r * np.cos(angle)
+                y = circle_center.y + r * np.sin(angle)
+                polar_points.append((x, y))
+
+    # Filter points inside both the polygon and the circle
+    filtered_points = np.array([
+        point for point in polar_points
+        if polygon.contains(Point(point)) and Point(point).distance(circle_center) <= circle_radius
+    ])
+
+
+    all_points = np.vstack([inside_points, filtered_points, subdivided_polygon])
+    
+    tol = 1e-4
+    tree = cKDTree(all_points)
+    indices = tree.query_ball_tree(tree, tol)
+
+    # Get unique representatives (keep the first point in each cluster)
+    unique_indices = np.array([min(group) for group in indices])
+    unique_points = all_points[np.unique(unique_indices)]
+
+    # Generate the initial mesh
+    initial_mesh = Delaunay(unique_points)
+
+    final_mesh0 = filter_delaunay(initial_mesh, polygon)
+    final_mesh=smooth_mesh(final_mesh0,iterations=1,alpha=0.1)
+    final_mesh1 = filter_delaunay(final_mesh, polygon)
+    
+    return final_mesh1,subdivided_polygon
+
